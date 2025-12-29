@@ -18,7 +18,6 @@ from sensitivity import (
 )
 # from quantization import rtn_quant_sequential
 from binary_search import binary_search_truncation_rank
-from multilevel_param_share import build_multilevel_config_from_baseline_by_param_share
 from greedy import greedy_search_truncation_rank, greedy_search_truncation_rank_multilevel
 from spectrum_greedy import spectrum_greedy_search_truncation_rank
 from config_translate import translate_rank_to_my_rank
