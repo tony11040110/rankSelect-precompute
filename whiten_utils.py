@@ -7,7 +7,6 @@ import torch.nn as nn
 import click
 from typing import Tuple
 from modules.svd_linear import SVDLinear
-from modules.multilevel_svd_linear import MultiSVDLinear
 
 current_path = os.path.dirname(os.path.abspath(__file__))
 parent_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -393,12 +392,13 @@ def whiten_decomposition(
     return L, R
 
 def compress_model_whiten(model, selection_result, args):
-    # Compress the model
+    # Compress the model (single-level only)
     module_dict = {name: module for name, module in model.named_modules()}
     full_name_dict = {module: name for name, module in model.named_modules()}
     linear_info = {}
+
     modules = [model]
-    while len(modules) > 0:
+    while modules:
         submodule = modules.pop()
         for name, raw_linear in submodule.named_children():
             if isinstance(raw_linear, nn.Linear):
@@ -411,17 +411,6 @@ def compress_model_whiten(model, selection_result, args):
             else:
                 modules.append(raw_linear)
 
-    use_multilevel = getattr(args, "multilevel", False)
-
-    # 只對特定幾層做 debug，避免太慢；你可以自己改這個 set
-    debug_layers = {
-        "model.layers.31.self_attn.q_proj",
-        "model.layers.31.self_attn.k_proj",
-        "model.layers.31.self_attn.v_proj",
-        "model.layers.31.self_attn.o_proj",
-        # 想看別層就加在這裡
-    }
-
     for layername, rank_cfg in selection_result.items():
         print(layername, end=" ")
 
@@ -433,105 +422,44 @@ def compress_model_whiten(model, selection_result, args):
         if layername not in module_dict:
             print(f"[skip] missing module: {layername}", end=" ")
             continue
+
         raw_linear = module_dict[layername]
+        if not isinstance(raw_linear, nn.Linear):
+            print(f"[skip] not nn.Linear: {layername}", end=" ")
+            continue
+
         if not hasattr(raw_linear, "scaling_diag_matrix"):
             print(f"[skip] no scaling_diag_matrix: {layername}", end=" ")
             continue
+
         info = linear_info[raw_linear]
 
-        if use_multilevel:
-            outer_rank = int(rank_cfg["outer"])
-            inner_rank = int(rank_cfg["inner"])
-
-            # ===================== DEBUG BLOCK =====================
-            if layername in debug_layers:
-                with torch.no_grad():
-                    W = raw_linear.weight.data
-                    in_features = W.size(1)
-                    device = W.device
-                    dtype = W.dtype
-
-                    # 固定一批隨機輸入
-                    x = torch.randn(8, in_features, device=device, dtype=dtype)
-
-                    # (1) 單層 SVDLinear，用 outer_rank 當參考
-                    if getattr(args, "search_with_succinct", False):
-                        base_outer = SVDLinear.from_linear_whiten_rank(
-                            raw_linear,
-                            rank=outer_rank,
-                            name=layername + "_outer_debug",
-                            succinct=True,
-                            sigma_fuse=getattr(args, "sigma_fuse", True),
-                        ).to(device).to(dtype)
-                    else:
-                        base_outer = SVDLinear.from_linear_whiten_rank(
-                            raw_linear,
-                            name=layername + "_outer_debug",
-                            rank=outer_rank,
-                        ).to(device).to(dtype)
-
-                    y_outer = base_outer(x)
-
-                    # (2) MultiSVDLinear：outer_rank + inner_rank
-                    if getattr(args, "search_with_succinct", False):
-                        svd_linear = MultiSVDLinear.from_linear_whiten_rank(
-                            linear=raw_linear,
-                            name=layername,
-                            rank=outer_rank,
-                            inner_rank=inner_rank,
-                            succinct=True,
-                        ).to(device).to(dtype)
-                    else:
-                        svd_linear = MultiSVDLinear.from_linear_whiten_rank(
-                            linear=raw_linear,
-                            name=layername,
-                            rank=outer_rank,
-                            inner_rank=inner_rank,
-                        ).to(device).to(dtype)
-
-                    y_multi = svd_linear(x)
-
-                    rel_err = (y_outer - y_multi).norm() / (y_outer.norm() + 1e-8)
-                    print(f"\n[DEBUG][ParamShare][{layername}] rel_err_vs_outer = {rel_err.item():.3e}")
-                # 最後放回 CPU，跟原本流程一致
-                svd_linear = svd_linear.cpu()
-
+        # ---- single-level rank parsing (兼容舊 multilevel config) ----
+        # 你新的 selection_result 應該是 int，但如果還是 {"outer":..,"inner":..} 就取 outer
+        if isinstance(rank_cfg, dict):
+            if "rank" in rank_cfg:
+                rank = int(rank_cfg["rank"])
+            elif "outer" in rank_cfg:
+                rank = int(rank_cfg["outer"])
             else:
-                # 原本的 multilevel 分支（沒有 debug 的 layer）
-                if getattr(args, "search_with_succinct", False):
-                    svd_linear = MultiSVDLinear.from_linear_whiten_rank(
-                        linear=raw_linear,
-                        name=layername,
-                        rank=outer_rank,
-                        inner_rank=inner_rank,
-                        succinct=True,
-                    ).cpu()
-                else:
-                    svd_linear = MultiSVDLinear.from_linear_whiten_rank(
-                        linear=raw_linear,
-                        name=layername,
-                        rank=outer_rank,
-                        inner_rank=inner_rank,
-                    ).cpu()
-            # ================== END DEBUG BLOCK ======================
-
+                raise ValueError(f"Unexpected rank_cfg dict for {layername}: {rank_cfg}")
         else:
-            # baseline 單層 SVDLinear
             rank = int(rank_cfg)
 
-            if getattr(args, "search_with_succinct", False):
-                svd_linear = SVDLinear.from_linear_whiten_rank(
-                    raw_linear,
-                    rank=rank,
-                    name=layername,
-                    succinct=True,
-                    sigma_fuse=getattr(args, "sigma_fuse", True),
-                ).cpu()
-            else:
-                svd_linear = SVDLinear.from_linear_whiten_rank(
-                    raw_linear,
-                    name=layername,
-                    rank=rank,
-                ).cpu()
+        # ---- build SVDLinear ----
+        if getattr(args, "search_with_succinct", False):
+            svd_linear = SVDLinear.from_linear_whiten_rank(
+                raw_linear,
+                rank=rank,
+                name=layername,
+                succinct=True,
+                sigma_fuse=getattr(args, "sigma_fuse", True),
+            ).cpu()
+        else:
+            svd_linear = SVDLinear.from_linear_whiten_rank(
+                raw_linear,
+                name=layername,
+                rank=rank,
+            ).cpu()
 
         setattr(info["father"], info["name"], svd_linear)

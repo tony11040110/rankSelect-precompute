@@ -13,12 +13,13 @@ from act_aware_utils import calib_input_distribution, compress_model_asvd, compr
 from sensitivity import (
     get_calib_sensitivity_ratio,
     get_calib_sensitivity_step_rank,
+    get_calib_sensitivity_step_rank_compressed_baseline,
     truncate_sensitivity_list,
-    get_calib_sensitivity_step_rank_multilevel,
 )
+
 # from quantization import rtn_quant_sequential
 from binary_search import binary_search_truncation_rank
-from greedy import greedy_search_truncation_rank, greedy_search_truncation_rank_multilevel
+from greedy import greedy_search_truncation_rank
 from spectrum_greedy import spectrum_greedy_search_truncation_rank
 from config_translate import translate_rank_to_my_rank
 from huggingface_utils import dump_to_huggingface_repos
@@ -117,105 +118,6 @@ def main(args):
     else:
         raise ValueError("Invalid method")
 
-    # --------------------------------------------------- Multilevel param-share (no new sensitivity / greedy) ---------------------------------------------------
-    # 如果同時指定了 baseline_config 與 multilevel_param_share，
-    # 則直接根據 baseline rank config 建立 multilevel ranks，跳過 sensitivity / greedy 搜尋。
-    if getattr(args, "multilevel_param_share", None) is not None and args.baseline_config is not None:
-        if args.method != "whiten":
-            raise ValueError("--multilevel_param_share 目前僅支援 method='whiten'")
-        p_inner = float(args.multilevel_param_share)
-        if not (0.0 <= p_inner <= 1.0):
-            raise ValueError(f"--multilevel_param_share 必須介於 [0, 1]，目前為 {p_inner}")
-
-        # 載入 baseline rank config：假設為 {layer_full_name: rank_int}
-        with open(args.baseline_config, "r") as f:
-            raw_cfg = json.load(f)
-        # 僅保留 value 是純數值的項目，假設這些就是 layer_name -> rank
-        baseline_rank_config = {
-            k: int(v) for k, v in raw_cfg.items() if isinstance(v, (int, float))
-        }
-
-        click.secho(f"[ParamShare] Load baseline rank config from {args.baseline_config}", fg="yellow")
-        tol = getattr(args, "param_share_tolerance", 0.05)
-        multi_config, global_feasible, layer_stats = build_multilevel_config_from_baseline_by_param_share(
-            model=model,
-            baseline_rank_config=baseline_rank_config,
-            p_inner=p_inner,
-            tol_ratio=tol,
-            verbose=True,
-        )
-        if not global_feasible:
-            click.secho(
-                f"[ParamShare] WARNING: 部分 layer 在 p_inner={p_inner} 下不可行，"
-                "總參數量可能與 baseline 有誤差（詳見輸出的 layer_stats）。",
-                fg="red",
-            )
-
-        # 將每層的 outer/inner rank 統一存成一份 JSON，方便之後重現
-        report_path = os.path.splitext(args.baseline_config)[0] + f"_mlshare_{int(p_inner*100)}.json"
-        with open(report_path, "w") as f:
-            json.dump(
-                {
-                    "baseline_config": args.baseline_config,
-                    "p_inner": p_inner,
-                    "param_share_tolerance": tol,
-                    "global_feasible": global_feasible,
-                    "layers": layer_stats,
-                },
-                f,
-                indent=2,
-            )
-        click.secho(
-            f"[ParamShare] multilevel rank config (by param-share) written to {report_path}",
-            fg="yellow",
-        )
-
-        # 後續壓縮與評估仍沿用原本 pipeline，只是 select_result 換成我們的 multilevel config
-        args.multilevel = True
-        select_result = multi_config
-
-        # ----------------- Compress model -----------------
-        start_time = time.time()
-        if args.method == "whiten":
-            compress_model_whiten(model, select_result, args)
-        elif args.method == "asvd":
-            compress_model_asvd(model, select_result, args)
-        elif args.method == "svd":
-            compress_model_svd(model, select_result, args)
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        click.secho(f"[ParamShare] Elapsed time for compression: {elapsed_time/60:.2f} minutes", fg="yellow")
-
-        # ----------------- Evaluate -----------------
-        model.half()
-        torch.cuda.empty_cache()
-        model.cuda()
-
-        result = evaluate_model(
-            model,
-            tokenizer,
-            args.model_id,
-            eval_ppl="wikitext2",
-            limit=-1,
-        )
-        test_ppl = result["wikitext2"]
-        click.secho(f"[ParamShare] Wikitext2 Test PPL: {test_ppl}", fg="yellow")
-
-        # 記錄結果（在原本 record_file 後面加一行標記 param-share）
-        rec = Path(args.record_file)
-        rec.parent.mkdir(parents=True, exist_ok=True)
-        with open(rec, "a+") as f:
-            f.write(
-                f"[ParamShare] param_ratio={args.param_ratio_target}, "
-                f"p_inner={p_inner}, method={args.method}, search_method={args.search_method}, "
-                f"step_type={args.step_type}, rank_step={args.rank_step}, "
-                f"sensitivity_metric={args.sensitivity_metric}, "
-                f"succinct_calib={args.search_with_succinct}, ppl={test_ppl}\n"
-            )
-        click.secho(f"[ParamShare] Result is saved to {rec}", fg="yellow")
-
-        return
-
     # --------------------------------------------------- Sensitivity list ---------------------------------------------------
     # spectrum search is training-free; skip sensitivity list creation.
     if args.search_method == "spectrum":
@@ -224,8 +126,7 @@ def main(args):
         # Optional warmup: if a baseline rank config is provided, do a local 7-point sweep
         # around that warmup rank for *every* layer, instead of a full grid.
         if (
-            (not args.multilevel)
-            and args.step_type == "rank"
+            args.step_type == "rank"
             and getattr(args, "baseline_config", None) is not None
         ):
             try:
@@ -244,29 +145,23 @@ def main(args):
             except Exception as e:
                 click.secho(f"[Warmup->Sensitivity] baseline_config load failed: {e}", fg="red")
 
-        if args.multilevel:
-            if args.step_type != "rank":
-                raise ValueError("multilevel mode currently only supports step_type='rank'")
-            sensitivity, base_ppl = get_calib_sensitivity_step_rank_multilevel(
-                model, calib_loader, args, args.use_cache, outer_rank_step=args.rank_step, inner_rank_step=args.rank_step
-            )
-        else:
-            if args.step_type == "rank":
-                if (
-                    getattr(args, "baseline_config", None) is not None
-                    and str(getattr(args, "sens_baseline_mode", "dense")).lower() == "compressed"
-                ):
-                    sensitivity, base_ppl = get_calib_sensitivity_step_rank_compressed_baseline(
-                        model, calib_loader, args, args.use_cache, rankstep=args.rank_step
-                    )
-                else:
-                    sensitivity, base_ppl = get_calib_sensitivity_step_rank(
-                        model, calib_loader, args, args.use_cache, rankstep=args.rank_step
-                    )
-            elif args.step_type == "param_ratio":
-                sensitivity, base_ppl = get_calib_sensitivity_ratio(
-                    model, calib_loader, args, args.use_cache, step=args.ratio_step
+       
+        if args.step_type == "rank":
+            if (
+                getattr(args, "baseline_config", None) is not None
+                and str(getattr(args, "sens_baseline_mode", "dense")).lower() == "compressed"
+            ):
+                sensitivity, base_ppl = get_calib_sensitivity_step_rank_compressed_baseline(
+                    model, calib_loader, args, args.use_cache, rankstep=args.rank_step
                 )
+            else:
+                sensitivity, base_ppl = get_calib_sensitivity_step_rank(
+                    model, calib_loader, args, args.use_cache, rankstep=args.rank_step
+                )
+        elif args.step_type == "param_ratio":
+            sensitivity, base_ppl = get_calib_sensitivity_ratio(
+                model, calib_loader, args, args.use_cache, step=args.ratio_step
+            )
 
     if args.no_search:
         return
@@ -291,24 +186,16 @@ def main(args):
             else:
                 modules.append(raw_linear)
     
-    if (not args.multilevel) and (args.search_method != "spectrum"):
+    if (args.search_method != "spectrum"):
         sensitivity = truncate_sensitivity_list(module_dict, sensitivity, args.rank_step)
     
     # search best truncation rank for each layer
     click.secho(f"Search method: {args.search_method}", fg="yellow")
-    if args.search_method == "STRS":
-        if args.multilevel:
-            raise ValueError("multilevel is not supported with search_method='STRS'")
-        select_result = binary_search_truncation_rank(module_dict, sensitivity, calib_loader, args.step_type, args)
-    elif args.search_method == "greedy":
-        if args.multilevel:
-            select_result, _ = greedy_search_truncation_rank_multilevel(module_dict=module_dict,
-                                                                        multi_sensitivity_dict=sensitivity, 
-                                                                        base_ppl=base_ppl,
-                                                                        param_ratio_target=args.param_ratio_target)
-        else:
+    
+        
+    if args.search_method == "greedy":
             ## Remove the high rank part of the sensitivity list
-            select_result, _ = greedy_search_truncation_rank(module_dict=module_dict,
+        select_result, _ = greedy_search_truncation_rank(module_dict=module_dict,
                                                             raw_sensitivity_dict=sensitivity, 
                                                             base_ppl=base_ppl,
                                                             do_succinct_calib=False, 
@@ -316,8 +203,6 @@ def main(args):
                                                             step_type=args.step_type,
                                                             args=args)
     elif args.search_method == "spectrum":
-        if args.multilevel:
-            raise ValueError("multilevel is not supported with search_method='spectrum'")
         # A1: activation-aware spectrum greedy (weighted by diag input covariance)
         select_result = spectrum_greedy_search_truncation_rank(
             linear_info=linear_info,
@@ -333,8 +218,6 @@ def main(args):
             verbose=True,
         )
     elif args.search_method == "uniform":
-        if args.multilevel:
-            raise ValueError("multilevel is not supported with search_method='uniform'")
         select_result = set_uniform_truncation_rank(module_dict, linear_info, args.param_ratio_target)
     else:
         raise ValueError("Invalid search method")
@@ -390,12 +273,8 @@ def main(args):
        click.secho(f"Result is saved to output/{args.record_file}", fg="yellow")
     
     
-    if args.multilevel:
-        rank_config_for_translate = {
-            layer: int(cfg["outer"]) for layer, cfg in select_result.items()
-        }
-    else:
-        rank_config_for_translate = select_result
+    
+    rank_config_for_translate = select_result
 
     # config = translate_to_rank(asvd_config=select_result)
     config = translate_rank_to_my_rank(
@@ -409,10 +288,7 @@ def main(args):
     else:
         search_succinct_str = ""
 
-    if args.multilevel:
-        multilevel_str = "_ml"
-    else:
-        multilevel_str = ""
+    
 
     if args.calib_dataset == "wikitext2":
         calib_dataset_str = "_w2"
@@ -425,14 +301,14 @@ def main(args):
         config_name = (
             f"{args.method}{calib_dataset_str}_{args.search_method}_"
             f"{args.step_type}_{args.rank_step}"
-            f"{search_succinct_str}{multilevel_str}_"
+            f"{search_succinct_str}_"
             f"{int(args.param_ratio_target*100)}_{round(test_ppl, 2):.2f}"
         )
     elif args.step_type == "param_ratio":
         config_name = (
             f"{args.method}{calib_dataset_str}_{args.search_method}_"
             f"{args.step_type}_{args.ratio_step}"
-            f"{search_succinct_str}{multilevel_str}_"
+            f"{search_succinct_str}_"
             f"{int(args.param_ratio_target*100)}_{round(test_ppl, 2):.2f}"
         )
 
@@ -447,35 +323,8 @@ def main(args):
             json.dump(config, f)
         click.secho(f"Config is saved to {filename}", fg="yellow")
 
-        # multilevel 模式：另外再存一份 outer+inner 完整 rank config
-        if args.multilevel:
-            ml_config = {
-                "model_id": args.model_id,
-                "method": args.method,
-                "calib_dataset": args.calib_dataset,
-                "search_method": args.search_method,
-                "step_type": args.step_type,
-                "rank_step": int(args.rank_step)
-                if args.step_type == "rank"
-                else None,
-                "param_ratio_target": float(args.param_ratio_target),
-                "base_ppl": float(base_ppl),
-                "layers": {
-                    layer: {
-                        "outer": int(cfg["outer"]),
-                        "inner": int(cfg["inner"]),
-                    }
-                    for layer, cfg in select_result.items()
-                },
-            }
+        
 
-            ml_filename = f"{args.config_root}/{config_name}_multilevel_rank.json"
-            with open(ml_filename, "w") as f:
-                json.dump(ml_config, f)
-            click.secho(
-                f"Multilevel rank config is saved to {ml_filename}",
-                fg="yellow",
-            )
 
     if args.dump_huggingface_model:
         save_folder = f"{args.save_folder}/{config_name}"
@@ -666,11 +515,6 @@ if __name__ == "__main__":
         help="Where to write SVD spectrum events (JSONL). If not set, use env SVDLOG_PATH; if none, disable logging."
     )    
     parser.add_argument(
-        "--multilevel",
-        action="store_true",
-        help="use multilevel SVD (outer+inner rank) on V in whiten method",
-    )
-    parser.add_argument(
         "--baseline_config",
         type=str,
         default=None,
@@ -685,18 +529,8 @@ if __name__ == "__main__":
              "'dense' measures per-layer sensitivity on the dense model (default). "
              "'compressed' measures sensitivity on the baseline-compressed model (e.g. spectrum baseline).",
     )
-    parser.add_argument(
-        "--multilevel_param_share",
-        type=float,
-        default=None,
-        help="If set together with --baseline_config, skip sensitivity/greedy and build multilevel ranks by parameter share.",
-    )
-    parser.add_argument(
-        "--param_share_tolerance",
-        type=float,
-        default=0.05,
-        help="Relative tolerance on parameter count when matching multilevel to the baseline.",
-    )
+    
+
 
     args = parser.parse_args()
 
