@@ -7,6 +7,27 @@ from evaluate_utils import evaluate_model, evaluate_perplexity
 from tqdm import tqdm
 import numpy as np
 import click
+
+def _resolve_eval_device(args, model):
+    """Resolve target device for sensitivity/perplexity evaluation.
+
+    Priority:
+      1) args.device if provided and not 'auto'
+      2) CUDA if available (cuda:0 respects CUDA_VISIBLE_DEVICES)
+      3) model's current parameter device
+    """
+    dev = getattr(args, "device", None)
+    if isinstance(dev, str) and dev and dev.lower() != "auto":
+        try:
+            return torch.device(dev)
+        except Exception:
+            pass
+    if torch.cuda.is_available():
+        return torch.device("cuda:0")
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
 from pathlib import Path
 
 import math
@@ -76,6 +97,10 @@ def get_calib_sensitivity_ratio(model, calib_loader, args, use_cache=True, step=
     
     click.secho(f"[Sensitivity_list] No cache_file={cache_file}", fg="red")
     click.secho(f"[Sensitivity_list] Create sensitivity list...", fg="yellow")
+
+    device = _resolve_eval_device(args, model)
+    model = model.to(device)
+    click.secho(f"[Sensitivity_list] eval_device={device}", fg="cyan", dim=True)
 
     full_name_dict = {module: name for name, module in model.named_modules()}
     linear_info = {}
@@ -192,6 +217,11 @@ def get_calib_sensitivity_step_rank(model, calib_loader, args, use_cache=True, r
     
     click.secho(f"No cache_file={cache_file}", fg="red")
     click.secho(f"Create sensitivity list...", fg="yellow")
+
+    device = _resolve_eval_device(args, model)
+    # Move whole model so downstream evaluators (which infer device from model params) run on GPU.
+    model = model.to(device)
+    click.secho(f"[Sensitivity] eval_device={device}", fg="cyan", dim=True)
 
     full_name_dict = {module: name for name, module in model.named_modules()}
     linear_info = {}

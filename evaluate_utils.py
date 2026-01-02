@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 import os
+import math
 
 from datautils import get_eval_loaders
 from datasets import load_dataset
@@ -11,78 +12,64 @@ import re
 
 
 @torch.no_grad()
-def evaluate_perplexity(model, input_ids, seqlen: int = 2048):
-    """
-    input_ids: [N, L] 的 LongTensor（通常是 wikitext2 encode 完的）
-    seqlen:    每個 eval chunk 的長度
+def evaluate_perplexity(model, input_ids: torch.Tensor, seqlen: int = 2048, micro_batch: int = 1):
+    """Robust perplexity evaluation.
+
+    Supports both:
+      - input_ids: [1, L]  (single long stream)
+      - input_ids: [B, L]  (B independent sequences)
+
+    Accumulates token-level negative log-likelihood (sum) and returns exp(mean_nll).
+    Skips chunks with length < 2 (cannot form next-token labels).
     """
     model.eval()
-
     device = next(model.parameters()).device
-    input_ids = input_ids.to(device)
 
-    n_tokens = input_ids.numel()
-    nsamples = n_tokens // seqlen
-    if nsamples == 0:
-        raise ValueError(f"evaluate_perplexity: not enough tokens ({n_tokens}) for seqlen={seqlen}")
+    if not isinstance(input_ids, torch.Tensor):
+        input_ids = torch.as_tensor(input_ids)
 
-    losses = []
+    if input_ids.dim() == 1:
+        input_ids = input_ids.unsqueeze(0)
+    elif input_ids.dim() != 2:
+        raise ValueError(f"evaluate_perplexity: expected 1D/2D input_ids, got shape={tuple(input_ids.shape)}")
 
-    for i in range(nsamples):
-        start = i * seqlen
-        end   = (i + 1) * seqlen
-        batch = input_ids[:, start:end]
+    input_ids = input_ids.to(torch.long)
 
-        # forward
-        outputs = model(input_ids=batch)
-        logits = outputs[0] if isinstance(outputs, (tuple, list)) else outputs.logits
+    B, L = input_ids.shape
+    micro_batch = max(1, int(micro_batch))
+    micro_batch = min(micro_batch, B)
 
-        # ---------- NaN / Inf debug on logits ----------
-        if not torch.isfinite(logits).all():
-            print(f"[NaN DEBUG] non-finite logits at step {i}")
-            print("  any NaN:", torch.isnan(logits).any().item(),
-                  "any Inf:", torch.isinf(logits).any().item())
-            print("  logits min/max:",
-                  logits.min().item(),
-                  logits.max().item())
-            print("  batch input_ids min/max:",
-                  batch.min().item(),
-                  batch.max().item())
-            raise RuntimeError("NaN/Inf in logits; see [NaN DEBUG]")
-        # ------------------------------------------------
+    total_nll = 0.0
+    total_tokens = 0
 
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = batch[..., 1:].contiguous()
+    for b0 in range(0, B, micro_batch):
+        batch_cpu = input_ids[b0 : b0 + micro_batch]
+        for t0 in range(0, L, seqlen):
+            t1 = min(L, t0 + seqlen)
+            chunk = batch_cpu[:, t0:t1]
+            if chunk.shape[1] < 2:
+                continue
 
-        loss = F.cross_entropy(
-            shift_logits.view(-1, shift_logits.size(-1)),
-            shift_labels.view(-1),
-            reduction="mean",
-        )
+            chunk = chunk.to(device, non_blocking=True)
+            outputs = model(input_ids=chunk, use_cache=False)
+            logits = outputs[0] if isinstance(outputs, (tuple, list)) else outputs.logits
 
-        # ---------- NaN / Inf debug on loss ----------
-        if not torch.isfinite(loss):
-            print(f"[NaN DEBUG] non-finite loss at step {i}")
-            print("  loss:", loss.item())
-            print("  shift_logits min/max:",
-                  shift_logits.min().item(),
-                  shift_logits.max().item())
-            raise RuntimeError("NaN/Inf in loss; see [NaN DEBUG]")
-        # ---------------------------------------------
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = chunk[:, 1:].contiguous()
 
-        losses.append(loss.item())
+            nll = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                reduction="sum",
+            )
+            total_nll += float(nll.item())
+            total_tokens += int(shift_labels.numel())
 
-    mean_loss = sum(losses) / len(losses)
+    if total_tokens == 0:
+        return float('nan')
 
-    # ---------- NaN / Inf debug on mean_loss ----------
-    if not math.isfinite(mean_loss):
-        print("[NaN DEBUG] non-finite mean_loss")
-        print("  losses:", losses)
-        raise RuntimeError("NaN/Inf in mean_loss; see [NaN DEBUG]")
-    # --------------------------------------------------
-
-    ppl = math.exp(mean_loss)
-    return ppl
+    mean_nll = total_nll / total_tokens
+    return float(math.exp(mean_nll))
 
 
 @torch.no_grad()

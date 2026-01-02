@@ -7,6 +7,7 @@ import torch.nn as nn
 import click
 from typing import Tuple
 from modules.svd_linear import SVDLinear
+#from modules.multilevel_svd_linear import MultiSVDLinear
 
 current_path = os.path.dirname(os.path.abspath(__file__))
 parent_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -59,12 +60,7 @@ def attach_nan_hooks_to_factorized_layers(model: nn.Module) -> None:
         return hook
 
     # 盡量涵蓋：我們自己定義的 factorized linear + 普通 Linear + Norm 類
-    hook_types = (
-        SVDLinear,
-        MultiSVDLinear,
-        nn.Linear,
-        nn.LayerNorm,
-    )
+    hook_types = (SVDLinear, nn.Linear, nn.LayerNorm)
 
     # RMSNorm 在 LLaMA 裡通常不是標準 nn.Module 類名，可以用名字判斷
     def is_rmsnorm(m: nn.Module) -> bool:
@@ -319,9 +315,10 @@ def insert_whiten_scale_matrix(model, calib_loader, calib_dataset="wikitext2", d
         
         if not os.path.exists("cache/whiten"):
             os.makedirs("cache/whiten")
-        torch.save(scaling_matrics, cache_file)
-        click.secho(
-            f"[whiten] Save scaling diag matrix to cache: {cache_file}", fg="yellow")
+        #torch.save(scaling_matrics, cache_file)
+        #click.secho(
+        #    f"[whiten] Save scaling diag matrix to cache: {cache_file}", fg="yellow")
+        click.secho("[whiten] skip saving cache .pt", fg="yellow")
     
     assert scaling_matrics is not None, "Scaling matrices is None"
 
@@ -419,6 +416,7 @@ def compress_model_whiten(model, selection_result, args):
         if layername == "lm_head" or layername.endswith(".lm_head") or layername.endswith("lm_head"):
             print("[skip] lm_head", end=" ")
             continue
+        
         if layername not in module_dict:
             print(f"[skip] missing module: {layername}", end=" ")
             continue

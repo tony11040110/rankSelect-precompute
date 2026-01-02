@@ -476,8 +476,11 @@ class SVDLinear(nn.Module):
     
 
     def forward(self, inp):
-        if abs(torch.max(inp)) > 65536:
-            click.secho(f"Max: {abs(torch.max(inp))} Overflow in FP16!!", fg="red")
+        if inp.numel() > 0:
+            mx_abs = inp.abs().max()
+            if mx_abs > 65536:
+                click.secho(f"Max: {mx_abs} Overflow in FP16!!", fg="red")
+                inp = inp / mx_abs
         if (inp != inp).any():
             click.secho(f"NaN in {self.name}", fg="red")
 

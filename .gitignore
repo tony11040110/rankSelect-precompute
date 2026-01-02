@@ -50,3 +50,5 @@ fig
 lm-evaluation-harness/
 *.safetensors
 *.model
+bench_runs/*
+*.jsonl

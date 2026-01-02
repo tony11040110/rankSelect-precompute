@@ -210,10 +210,8 @@ def main(args):
             rank_step=int(args.rank_step),
             score_mode="energy_per_param",
             min_rank=max(1, int(args.rank_step)),
-            model=model,
-            calib_loader=calib_loader,
-            n_calib_samples=int(args.n_calib_samples),
-            act_aware=True,
+            #n_calib_samples=int(args.n_calib_samples),
+            #act_aware=True,
             device=str(args.device),
             verbose=True,
         )
@@ -267,8 +265,8 @@ def main(args):
 
     # 確保資料夾存在
     rec.parent.mkdir(parents=True, exist_ok=True)
-    # with open(f"output/{args.record_file}", "a+") as f:
-    with open(rec, "a+") as f:
+    with open(f"output/{args.record_file}", "a+") as f:
+    #with open(rec, "a+") as f:
        f.write(f"param_ratio={args.param_ratio_target}, method={args.method}, search={args.search_method}, succinct_calib={args.search_with_succinct}, ppl={test_ppl}\n")
        click.secho(f"Result is saved to output/{args.record_file}", fg="yellow")
     
@@ -322,6 +320,9 @@ def main(args):
         with open(filename, "w") as f:
             json.dump(config, f)
         click.secho(f"Config is saved to {filename}", fg="yellow")
+        with open("config_dump.json", "w") as f:
+            json.dump(config, f)
+        click.secho("Config is also saved to ./config_dump.json", fg="yellow")
 
         
 
@@ -471,7 +472,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config_root",
         type=str,
-        default="/home/yuko29_l/llm_compression/config",
+        default="./config",
         help="root directory for saving configs",
     )
     parser.add_argument(
@@ -487,7 +488,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--save_folder",
         type=str,
-        default="/share/saves/yuko29_l/svd_models",
+        default="./svd_models",
         help="folder for saving compressed models",
     )
     parser.add_argument(
