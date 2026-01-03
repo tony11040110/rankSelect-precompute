@@ -35,14 +35,56 @@ import torch
 import torch.nn as nn
 
 @torch.no_grad()
-def _evaluate_perplexity_from_batches(model, input_batches):
+def _evaluate_perplexity_from_batches(model, input_batches, device=None):
+    """Evaluate perplexity on a list/iterable of token batches.
+    Notes:
+      - We explicitly control the eval device to avoid CPU/CUDA mismatch when some
+        tensors/buffers are on a different device.
+      - `input_batches` items are expected to be 1D or 2D Long tensors containing token ids.
     """
-    用多個小 batch 依序算 PPL，避免一次把所有 sample 丟進 GPU。
-    input_batches: list[Tensor]，每個 tensor shape = [B, L]
-    回傳: ppl (float)
-    """
-    device = next(model.parameters()).device
+    # Prefer the embedding device (more reliable than next(model.parameters()) if some buffers live on CPU)
+    if device is None:
+        try:
+            device = model.get_input_embeddings().weight.device
+        except Exception:
+            # fallback
+            device = next(model.parameters()).device
+    if isinstance(device, str):
+        device = torch.device(device)
+
     model.eval()
+    total_nll = 0.0
+    total_tokens = 0
+
+    for input_ids in input_batches:
+        if not torch.is_tensor(input_ids):
+            input_ids = torch.tensor(input_ids, dtype=torch.long)
+        if input_ids.numel() == 0:
+            continue
+
+        # Ensure shape [B, T]
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+
+        input_ids = input_ids.to(device, non_blocking=True)
+        labels = input_ids.clone()
+
+        outputs = model(input_ids=input_ids, use_cache=False)
+        logits = outputs.logits
+
+        # shift: predict token t+1 from t
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+
+        loss_fct = nn.CrossEntropyLoss(reduction="sum")
+        nll = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+
+        total_nll += float(nll.item())
+        total_tokens += int(shift_labels.numel())
+
+    if total_tokens == 0:
+        return float("nan")
+    return float(torch.exp(torch.tensor(total_nll / total_tokens)).item())
 
     loss_fct = nn.CrossEntropyLoss(reduction="none")
     total_nll = 0.0
@@ -120,7 +162,7 @@ def get_calib_sensitivity_ratio(model, calib_loader, args, use_cache=True, step=
     
     # Evaluate the ppl of the evaluation samples
     eval_input_ids = torch.cat([calib_loader[i]["input_ids"] for i in range(args.n_calib_samples)], 0) 
-    base_ppl = evaluate_perplexity(model, eval_input_ids)
+    base_ppl = _evaluate_perplexity_from_batches(model, calib_batches, device=device)
     click.secho(f"[Sensitivity] base_ppl ppl: {base_ppl}", fg="yellow")
     click.secho(f"[Sensitivity] eval_input_ids.shape={eval_input_ids.shape}", fg="yellow")
 
@@ -159,7 +201,7 @@ def get_calib_sensitivity_ratio(model, calib_loader, args, use_cache=True, step=
                 )
             setattr(info["father"], info["name"], svd_linear)
 
-            ppl = evaluate_perplexity(model, eval_input_ids)
+            ppl = _evaluate_perplexity_from_batches(model, calib_batches, device=device)
             sensitivity_dict[info["full_name"]][param_ratio] = ppl
             print(f"{info['full_name']} {param_ratio} {ppl}")
             pbar.update(1)
@@ -222,6 +264,9 @@ def get_calib_sensitivity_step_rank(model, calib_loader, args, use_cache=True, r
     # Move whole model so downstream evaluators (which infer device from model params) run on GPU.
     model = model.to(device)
     click.secho(f"[Sensitivity] eval_device={device}", fg="cyan", dim=True)
+    
+    calib_batches = [calib_loader[i]["input_ids"] for i in range(args.n_calib_samples)]
+    base_ppl = _evaluate_perplexity_from_batches(model, calib_batches, device=device)
 
     full_name_dict = {module: name for name, module in model.named_modules()}
     linear_info = {}
@@ -241,7 +286,7 @@ def get_calib_sensitivity_step_rank(model, calib_loader, args, use_cache=True, r
 
     # Evaluate the ppl of the evaluation samples
     eval_input_ids = torch.cat([calib_loader[i]["input_ids"] for i in range(args.n_calib_samples)], 0) 
-    base_ppl = evaluate_perplexity(model, eval_input_ids)
+    base_ppl = _evaluate_perplexity_from_batches(model, calib_batches, device=device)
     click.secho(f"[Sensitivity] base_ppl: {base_ppl}", fg="yellow")
     click.secho(f"[Sensitivity] eval_input_ids.shape={eval_input_ids.shape}", fg="yellow")
     
@@ -304,7 +349,7 @@ def get_calib_sensitivity_step_rank(model, calib_loader, args, use_cache=True, r
                 )
             setattr(info["father"], info["name"], svd_linear)
 
-            ppl = evaluate_perplexity(model, eval_input_ids)
+            ppl = _evaluate_perplexity_from_batches(model, calib_batches, device=device)
             sensitivity_dict[info["full_name"]][rank] = ppl
             print(f"{info['full_name']} {rank} {ppl}")
             pbar.update(1)
@@ -368,6 +413,10 @@ def get_calib_sensitivity_step_rank_compressed_baseline(model, calib_loader, arg
         saved = torch.load(cache_file, map_location="cpu")
         return saved["sensitivity_dict"], saved["base_ppl"]
 
+    device = _resolve_eval_device(args, model)
+    model = model.to(device)
+    click.secho(f"[Sensitivity_list] eval_device={device}", fg="cyan", dim=True)
+
     # Prepare eval batches
     max_eval_samples = args.n_calib_samples
     calib_batches = []
@@ -418,7 +467,7 @@ def get_calib_sensitivity_step_rank_compressed_baseline(model, calib_loader, arg
         baseline_modules[full_name] = svd_base
         setattr(info["father"], info["name"], svd_base)
 
-    base_ppl = _evaluate_perplexity_from_batches(model, calib_batches)
+    base_ppl = _evaluate_perplexity_from_batches(model, calib_batches, device=device)
     click.secho(f"[Sensitivity(base=compressed)] base_ppl = {base_ppl}", fg="yellow")
 
     sensitivity_dict = {}
@@ -451,7 +500,7 @@ def get_calib_sensitivity_step_rank_compressed_baseline(model, calib_loader, arg
                 raise ValueError(f"Unsupported method={args.method} in compressed-baseline sensitivity")
 
             setattr(info["father"], info["name"], svd_linear)
-            ppl = _evaluate_perplexity_from_batches(model, calib_batches)
+            ppl = _evaluate_perplexity_from_batches(model, calib_batches, device=device)
             layer_sens[int(rank)] = float(ppl)
 
             setattr(info["father"], info["name"], base_module)
