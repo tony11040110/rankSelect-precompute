@@ -129,21 +129,36 @@ def main(args):
             args.step_type == "rank"
             and getattr(args, "baseline_config", None) is not None
         ):
-            try:
-                with open(args.baseline_config, "r") as f:
-                    raw_cfg = json.load(f)
-                warmup_rank_config = {
-                    k: int(v) for k, v in raw_cfg.items() if isinstance(v, (int, float))
-                }
-                # sensitivity.py reads these from args (no extra CLI needed)
-                args.warmup_rank_dict = warmup_rank_config
-                args.local_points = 7
+            lp = getattr(args, "local_points", None)  # None: 未指定；0: full list；>0: local sweep
+            if lp is None or int(lp) > 0:
+                try:
+                    with open(args.baseline_config, "r") as f:
+                        raw_cfg = json.load(f)
+                    warmup_rank_config = {
+                        k: int(v) for k, v in raw_cfg.items() if isinstance(v, (int, float))
+                    }
+                    args.warmup_rank_dict = warmup_rank_config
+
+                    if lp is None:
+                        args.local_points = 7
+                        click.secho(
+                            f"[Warmup->Sensitivity] Use local 7-point sweep around baseline_config={args.baseline_config}",
+                            fg="yellow",
+                        )
+                    else:
+                        # lp > 0: 使用使用者指定的 local_points，不覆寫
+                        click.secho(
+                            f"[Warmup->Sensitivity] Use local {int(lp)}-point sweep around baseline_config={args.baseline_config}",
+                            fg="yellow",
+                        )
+                except Exception as e:
+                    click.secho(f"[Warmup->Sensitivity] baseline_config load failed: {e}", fg="red")
+            else:
+                # lp == 0: full sensitivity list，明確不要 local sweep，也不要 warmup_rank_dict
                 click.secho(
-                    f"[Warmup->Sensitivity] Use local 7-point sweep around baseline_config={args.baseline_config}",
+                    f"[Warmup->Sensitivity] local_points=0 -> full sensitivity list (skip local sweep). baseline_config={args.baseline_config}",
                     fg="yellow",
                 )
-            except Exception as e:
-                click.secho(f"[Warmup->Sensitivity] baseline_config load failed: {e}", fg="red")
 
        
         if args.step_type == "rank":
@@ -532,6 +547,13 @@ if __name__ == "__main__":
     )
     
 
+
+    parser.add_argument(
+        "--local_points",
+        type=int,
+        default=None,
+        help="Local sensitivity sweep half-width (in rank_step units). If >0, evaluate ranks in [k0-local_points*rank_step, ..., k0+local_points*rank_step]. If 0, evaluate full sensitivity list. Default: auto-enable 7 when baseline_config is used for sensitivity.",
+    )
 
     args = parser.parse_args()
 

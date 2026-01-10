@@ -383,10 +383,9 @@ def get_calib_sensitivity_step_rank_compressed_baseline(model, calib_loader, arg
 
     warmup_rank_dict = getattr(args, "warmup_rank_dict", None)
     local_points = int(getattr(args, "local_points", 0) or 0)
-    if not (isinstance(warmup_rank_dict, dict) and local_points > 0):
+    if not isinstance(warmup_rank_dict, dict):
         raise ValueError(
-            "compressed-baseline sensitivity requires args.warmup_rank_dict and args.local_points>0 "
-            "(set by llm_rs.py when --baseline_config is provided)."
+            "Compressed-baseline sensitivity requires a baseline_config dict (warmup_rank_dict)."
         )
 
     base = getattr(args, "baseline_config", None)
@@ -482,9 +481,15 @@ def get_calib_sensitivity_step_rank_compressed_baseline(model, calib_loader, arg
         max_rank = min(H, W)
         k0 = int(warmup_rank_dict.get(full_name, max_rank))
         k0 = max(1, min(k0, max_rank))
-
-        candidates = [k0 + (t * rankstep) for t in range(-half, half + 1)]
-        rank_candidates = sorted({max(1, min(int(k), max_rank)) for k in candidates})
+        if local_points > 0:
+            candidates = [k0 + (t * rankstep) for t in range(-half, half + 1)]
+            rank_candidates = sorted({max(1, min(int(k), max_rank)) for k in candidates})
+        else:
+            # Full sensitivity list (same convention as dense-baseline sensitivity)
+            rank_candidates = list(range(rankstep, max_rank, rankstep))
+            if max_rank not in rank_candidates:
+                rank_candidates.append(max_rank)
+            rank_candidates = sorted(set(rank_candidates))
 
         layer_sens = {}
         for rank in rank_candidates:
