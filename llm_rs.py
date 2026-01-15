@@ -123,42 +123,44 @@ def main(args):
     if args.search_method == "spectrum":
         sensitivity, base_ppl = None, None
     else:
-        # Optional warmup: if a baseline rank config is provided, do a local 7-point sweep
-        # around that warmup rank for *every* layer, instead of a full grid.
+        # Optional warmup / baseline ranks:
+        # If --baseline_config is provided, we ALWAYS parse it into args.warmup_rank_dict.
+        # - When local_points is None: default to local 7-point sweep.
+        # - When local_points > 0: use user-specified local sweep width.
+        # - When local_points == 0: do remind "full sensitivity list", but still keep warmup_rank_dict so
+        #   compressed-baseline sensitivity can build the baseline-compressed model.
         if (
             args.step_type == "rank"
             and getattr(args, "baseline_config", None) is not None
         ):
             lp = getattr(args, "local_points", None)  # None: 未指定；0: full list；>0: local sweep
-            if lp is None or int(lp) > 0:
-                try:
-                    with open(args.baseline_config, "r") as f:
-                        raw_cfg = json.load(f)
-                    warmup_rank_config = {
-                        k: int(v) for k, v in raw_cfg.items() if isinstance(v, (int, float))
-                    }
-                    args.warmup_rank_dict = warmup_rank_config
+            try:
+                with open(args.baseline_config, "r") as f:
+                    raw_cfg = json.load(f)
+                warmup_rank_config = {
+                    k: int(v) for k, v in raw_cfg.items() if isinstance(v, (int, float))
+                }
+                args.warmup_rank_dict = warmup_rank_config
 
-                    if lp is None:
-                        args.local_points = 7
-                        click.secho(
-                            f"[Warmup->Sensitivity] Use local 7-point sweep around baseline_config={args.baseline_config}",
-                            fg="yellow",
-                        )
-                    else:
-                        # lp > 0: 使用使用者指定的 local_points，不覆寫
-                        click.secho(
-                            f"[Warmup->Sensitivity] Use local {int(lp)}-point sweep around baseline_config={args.baseline_config}",
-                            fg="yellow",
-                        )
-                except Exception as e:
-                    click.secho(f"[Warmup->Sensitivity] baseline_config load failed: {e}", fg="red")
-            else:
-                # lp == 0: full sensitivity list，明確不要 local sweep，也不要 warmup_rank_dict
-                click.secho(
-                    f"[Warmup->Sensitivity] local_points=0 -> full sensitivity list (skip local sweep). baseline_config={args.baseline_config}",
-                    fg="yellow",
-                )
+                if lp is None:
+                    args.local_points = 7
+                    click.secho(
+                        f"[Warmup->Sensitivity] Use local 7-point sweep around baseline_config={args.baseline_config}",
+                        fg="yellow",
+                    )
+                elif int(lp) > 0:
+                    click.secho(
+                        f"[Warmup->Sensitivity] Use local {int(lp)}-point sweep around baseline_config={args.baseline_config}",
+                        fg="yellow",
+                    )
+                else:
+                    # lp == 0: full sensitivity list, but keep warmup_rank_dict for compressed-baseline construction.
+                    click.secho(
+                        f"[Warmup->Sensitivity] local_points=0 -> full sensitivity list (skip local sweep). baseline_config={args.baseline_config}",
+                        fg="yellow",
+                    )
+            except Exception as e:
+                click.secho(f"[Warmup->Sensitivity] baseline_config load failed: {e}", fg="red")
 
        
         if args.step_type == "rank":

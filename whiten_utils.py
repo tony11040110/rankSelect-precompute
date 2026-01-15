@@ -315,10 +315,10 @@ def insert_whiten_scale_matrix(model, calib_loader, calib_dataset="wikitext2", d
         
         if not os.path.exists("cache/whiten"):
             os.makedirs("cache/whiten")
-        #torch.save(scaling_matrics, cache_file)
-        #click.secho(
-        #    f"[whiten] Save scaling diag matrix to cache: {cache_file}", fg="yellow")
-        click.secho("[whiten] skip saving cache .pt", fg="yellow")
+        torch.save(scaling_matrics, cache_file)
+        click.secho(
+           f"[whiten] Save scaling diag matrix to cache: {cache_file}", fg="yellow")
+        #click.secho("[whiten] skip saving cache .pt", fg="yellow")
     
     assert scaling_matrics is not None, "Scaling matrices is None"
 

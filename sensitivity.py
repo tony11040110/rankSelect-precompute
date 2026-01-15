@@ -383,9 +383,33 @@ def get_calib_sensitivity_step_rank_compressed_baseline(model, calib_loader, arg
 
     warmup_rank_dict = getattr(args, "warmup_rank_dict", None)
     local_points = int(getattr(args, "local_points", 0) or 0)
+
+    # Robustness: allow passing only --baseline_config; if warmup_rank_dict is missing, try to load it here.
+    if not isinstance(warmup_rank_dict, dict):
+        base_path = getattr(args, "baseline_config", None)
+        if isinstance(base_path, str) and len(base_path) > 0 and os.path.exists(base_path):
+            try:
+                with open(base_path, "r") as f:
+                    raw_cfg = json.load(f)
+                warmup_rank_dict = {
+                    k: int(v) for k, v in raw_cfg.items() if isinstance(v, (int, float))
+                }
+                args.warmup_rank_dict = warmup_rank_dict
+                click.secho(
+                    f"[Sensitivity(base=compressed)] Loaded baseline ranks from {base_path}",
+                    fg="cyan",
+                    dim=True,
+                )
+            except Exception as e:
+                click.secho(
+                    f"[Sensitivity(base=compressed)] baseline_config load failed: {e}",
+                    fg="red",
+                )
+
     if not isinstance(warmup_rank_dict, dict):
         raise ValueError(
-            "Compressed-baseline sensitivity requires a baseline_config dict (warmup_rank_dict)."
+            "Compressed-baseline sensitivity requires baseline ranks. "
+            "Please provide --baseline_config (JSON: layer_name -> rank) or args.warmup_rank_dict."
         )
 
     base = getattr(args, "baseline_config", None)
