@@ -9,9 +9,34 @@ import itertools
 from torch.utils.data.dataset import Dataset
 import click
 
+def patch_datasets_filelock_to_tmp():
+    """
+    Redirect HuggingFace datasets' FileLock to /tmp to avoid permission issues
+    on shared cache lock files. Does NOT change dataset cache directory.
+    """
+    try:
+        import os, tempfile, hashlib
+        import datasets.builder as db
+        from filelock import FileLock as _FileLock
+
+        class TmpFileLock(_FileLock):
+            def __init__(self, lock_file, *args, **kwargs):
+                base = os.path.basename(lock_file)
+                h = hashlib.md5(lock_file.encode("utf-8")).hexdigest()[:10]
+                lock_file = os.path.join(tempfile.gettempdir(), f"{base}.{h}.lock")
+                super().__init__(lock_file, *args, **kwargs)
+
+        # datasets.builder 內部用的就是這個符號
+        db.FileLock = TmpFileLock
+    except Exception:
+        # patch failure should not break evaluation; it will fall back to default behavior
+        pass
+
+
 @torch.no_grad()
 def eval_ppl(model, tokenizer, seqlen=2048, batch_size=1):
-    print(model)
+    # print(model)
+    
     # Transpose the ALinear and BLinear weight in ASVDLinear in the model
     # if args.bits == 16:
     #     from svd_llama.modeling_asvd_llama import ASVDLinear
@@ -98,7 +123,12 @@ def lm_eval_zero_shot(model, tokenizer, tasks, batch_size=1, peft=None, parallel
     from lm_eval import utils as lm_eval_utils
     from lm_eval.api.registry import ALL_TASKS
     from lm_eval.models.huggingface import HFLM
-    import wandb
+    if report_to_wandb:
+        try:
+            import wandb
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError("wandb is required only when report_to_wandb=True. Install it with: pip install wandb") from e
+
     import json
     import pprint
 
@@ -110,6 +140,12 @@ def lm_eval_zero_shot(model, tokenizer, tasks, batch_size=1, peft=None, parallel
     
     
     hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size, peft=peft, parallelize=parallelize)
+    
+    # lm-eval 需要 tasks 是 list 或可解析的 group；避免把逗號串當成單一 task
+    if isinstance(tasks, str):
+        tasks = [t.strip() for t in tasks.split(",") if t.strip()]
+        
+    patch_datasets_filelock_to_tmp()
     
     results = lm_eval.simple_evaluate(hflm, tasks=tasks, batch_size=batch_size)['results']
 
@@ -140,7 +176,12 @@ def lm_eval_mmlu(model, tokenizer, batch_size=1, peft=None, parallelize=False, r
     from lm_eval import utils as lm_eval_utils
     from lm_eval.api.registry import ALL_TASKS
     from lm_eval.models.huggingface import HFLM
-    import wandb
+    if report_to_wandb:
+        try:
+            import wandb
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError("wandb is required only when report_to_wandb=True. Install it with: pip install wandb") from e
+
     import json
     import pprint
 
