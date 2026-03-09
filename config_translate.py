@@ -28,7 +28,8 @@ def translate_to_asvd(my_config, num_layers):
     asvd_config = {}
     asvd_config["lm_head"] = 1
     
-    for idx in range(num_layers, -1, -1):
+    #for idx in range(num_layers, -1, -1):
+    for idx, block in enumerate(my_config["blocks"]):
         block = my_config["blocks"][idx]
         asvd_config[f"model.layers.{idx}.self_attn.q_proj"] = block["q_proj"]
         asvd_config[f"model.layers.{idx}.self_attn.k_proj"] = block["k_proj"]

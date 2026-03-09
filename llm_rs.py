@@ -21,7 +21,7 @@ from sensitivity import (
 from binary_search import binary_search_truncation_rank
 from greedy import greedy_search_truncation_rank
 from spectrum_greedy import spectrum_greedy_search_truncation_rank
-from config_translate import translate_rank_to_my_rank
+from config_translate import translate_rank_to_my_rank, translate_to_asvd
 from huggingface_utils import dump_to_huggingface_repos
 from transformers import LlamaForCausalLM
 from accelerate import infer_auto_device_map, init_empty_weights
@@ -137,9 +137,18 @@ def main(args):
             try:
                 with open(args.baseline_config, "r") as f:
                     raw_cfg = json.load(f)
-                warmup_rank_config = {
-                    k: int(v) for k, v in raw_cfg.items() if isinstance(v, (int, float))
-                }
+                if isinstance(raw_cfg, dict) and "blocks" in raw_cfg:
+                    warmup_rank_config = {
+                        k: int(v)
+                        for k, v in translate_to_asvd(raw_cfg, len(model.model.layers)).items()
+                        if k != "lm_head"
+                    }
+                else:
+                    warmup_rank_config = {
+                        k: int(v)
+                        for k, v in raw_cfg.items()
+                        if isinstance(v, (int, float))
+                    }
                 args.warmup_rank_dict = warmup_rank_config
 
                 if lp is None:
