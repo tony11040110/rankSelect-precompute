@@ -54,17 +54,18 @@ def main(args):
 
     try:
         from utils.svd_logger import SVDLogger
-        os.environ["SVDLOG_PATH"] = args.svdlog_path
-        SVDLogger(args.svdlog_path).run_header({
-            "model_id": args.model_id,
-            "method": args.method,
-            "step_type": args.step_type,
-            "rank_step": args.rank_step,
-            "search_method": args.search_method,
-            "param_ratio_target": args.param_ratio_target,
-            "calib_dataset": args.calib_dataset,
-            "cmd": " ".join(os.sys.argv),
-        })
+        if args.svdlog_path:
+            os.environ["SVDLOG_PATH"] = args.svdlog_path
+            SVDLogger(args.svdlog_path).run_header({
+                "model_id": args.model_id,
+                "method": args.method,
+                "step_type": args.step_type,
+                "rank_step": args.rank_step,
+                "search_method": args.search_method,
+                "param_ratio_target": args.param_ratio_target,
+                "calib_dataset": args.calib_dataset,
+                "cmd": " ".join(os.sys.argv),
+            })
     except Exception as e:
         print("[SVDLOG] header failed:", e)
 
@@ -108,19 +109,37 @@ def main(args):
     # --------------------------------------------------- Calibration data ---------------------------------------------------
 
     # sensitivity calibration
-    calib_loader = get_calib_data(args.calib_dataset, tokenizer, model_id, nsamples=256, seqlen=model.seqlen, seed=3)
-    if args.method == "asvd":
-        calib_input_distribution(model, calib_loader, args.scaling_method, args.use_cache)
-    elif args.method == "whiten":
-        insert_whiten_scale_matrix(model=model, calib_loader=calib_loader, calib_dataset=args.calib_dataset, dev=args.device)
-    elif args.method == "svd":
-        pass
-    else:
-        raise ValueError("Invalid method")
+    training_free_search = args.search_method in ["uniform", "spectrum"]
 
+    # uniform/spectrum + only_search 不需要 calib data / whiten scale / act-aware stats
+    if training_free_search and args.only_search:
+        calib_loader = None
+    else:
+        calib_loader = get_calib_data(
+            args.calib_dataset,
+            tokenizer,
+            model_id,
+            nsamples=args.n_calib_samples,
+            seqlen=model.seqlen,
+            seed=3,
+        )
+
+        if args.method == "asvd":
+            calib_input_distribution(model, calib_loader, args.scaling_method, args.use_cache)
+        elif args.method == "whiten":
+            insert_whiten_scale_matrix(
+                model=model,
+                calib_loader=calib_loader,
+                calib_dataset=args.calib_dataset,
+                dev=args.device,
+            )
+        elif args.method == "svd":
+            pass
+        else:
+            raise ValueError("Invalid method")
     # --------------------------------------------------- Sensitivity list ---------------------------------------------------
     # spectrum search is training-free; skip sensitivity list creation.
-    if args.search_method == "spectrum":
+    if args.search_method in ["spectrum", "uniform"]:
         sensitivity, base_ppl = None, None
     else:
         # Optional warmup / baseline ranks:
@@ -212,7 +231,7 @@ def main(args):
             else:
                 modules.append(raw_linear)
     
-    if (args.search_method != "spectrum"):
+    if args.search_method not in ["spectrum", "uniform"]:
         sensitivity = truncate_sensitivity_list(module_dict, sensitivity, args.rank_step)
     
     # search best truncation rank for each layer

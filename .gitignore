@@ -54,3 +54,4 @@ bench_runs*/
 config_for_ppl/
 *.jsonl
 bench_recursive*/
+bench*/

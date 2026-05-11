@@ -6,7 +6,7 @@ from utils.svd_logger import SVDLogger, get_logger_from_env
 class SVDLinear(nn.Module):
     def __init__(self, U, S, V, bias=None, name=None, sigma_fuse='UV', V_transpose=True, succinct=False, succinct_split="A") -> None:
         super().__init__()
-        self.ALinear = nn.Linear(U.size(1), U.size(0), bias=False)
+        self.ALinear = nn.Linear(U.size(1), U.size(0), bias=bias is not None)
 
         self.BLinear = nn.Linear(V.size(1), V.size(0), bias=False)
         self.truncation_rank = S.size(0)
@@ -52,6 +52,9 @@ class SVDLinear(nn.Module):
             self.BLinear.weight.data = self.BLinear.weight.data.mul(S.view(-1, 1)).contiguous()
         else:
             raise ValueError("sigma_fuse should be 'UV', 'U' or 'V'")
+
+        if bias is not None:
+            self.ALinear.bias.data = bias.detach().clone().to(self.ALinear.weight.device)
 
         # Post processing for succinct SVD
         if succinct:
@@ -291,12 +294,12 @@ class SVDLinear(nn.Module):
         U, S, Vh = torch.linalg.svd(w, full_matrices=False)
         
         #record svd energy in 
-        log_svd_energy("SVD-1", S)
-        U2, S2, V2h = torch.linalg.svd(U, full_matrices=False)
-        log_svd_energy("SVD-U", S2)
+        # log_svd_energy("SVD-1", S)
+        # U2, S2, V2h = torch.linalg.svd(U, full_matrices=False)
+        # log_svd_energy("SVD-U", S2)
 
-        U3, S3, V3h = torch.linalg.svd(Vh, full_matrices=False)
-        log_svd_energy("SVD-V", S3)
+        # U3, S3, V3h = torch.linalg.svd(Vh, full_matrices=False)
+        # log_svd_energy("SVD-V", S3)
 
 
         # Low rank approximation
